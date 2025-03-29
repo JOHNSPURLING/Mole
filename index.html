@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Whack-a-Mole</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      text-align: center;
+      background-color: transparent;
+      cursor: url('https://static.wixstatic.com/media/5d5455_875af6ad5fd24121a40d0946719f7570~mv2.png') 16 16, auto;
+    }
+
+    h1 {
+      margin-top: 20px;
+    }
+
+    #score, #timer {
+      font-size: 20px;
+      margin: 10px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, 100px);
+      grid-gap: 15px;
+      justify-content: center;
+      margin: 20px auto;
+    }
+
+    .square {
+      width: 100px;
+      height: 100px;
+      background-color: #8B4513;
+      border-radius: 50%;
+      position: relative;
+      box-shadow: inset 0 5px 10px rgba(0,0,0,0.3);
+      cursor: pointer;
+    }
+
+    .mole-img {
+      width: 80px;
+      height: 80px;
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      pointer-events: none;
+    }
+
+    button {
+      padding: 10px 20px;
+      font-size: 16px;
+      background-color: #28a745;
+      border: none;
+      color: white;
+      border-radius: 6px;
+      cursor: pointer;
+      margin-top: 10px;
+    }
+
+    button:hover {
+      background-color: #218838;
+    }
+
+    #win-screen {
+      display: none;
+      margin-top: 20px;
+    }
+
+    #win-screen img {
+      width: 300px;
+    }
+
+    #code {
+      font-size: 28px;
+      color: darkblue;
+      margin-top: 10px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Whack-a-Mole!</h1>
+  <div id="score">Score: 0</div>
+  <div id="timer">Time left: 60s</div>
+
+  <div class="grid">
+    <div class="square" id="square1"></div>
+    <div class="square" id="square2"></div>
+    <div class="square" id="square3"></div>
+    <div class="square" id="square4"></div>
+    <div class="square" id="square5"></div>
+    <div class="square" id="square6"></div>
+    <div class="square" id="square7"></div>
+    <div class="square" id="square8"></div>
+    <div class="square" id="square9"></div>
+  </div>
+
+  <button onclick="startGame()">Start Game</button>
+
+  <div id="win-screen">
+    <img src="https://static.wixstatic.com/media/5d5455_a62682a037b44a6095584e25de456d98~mv2.png" alt="You Win">
+    <div id="code">Code: 13579</div>
+  </div>
+
+  <script>
+    let score = 0;
+    let currentMoleId = null;
+    let moleTimer, countdown;
+    let timeLeft = 60;
+    const maxScore = 10;
+
+    function randomSquare() {
+      document.querySelectorAll('.square').forEach(sq => sq.innerHTML = '');
+      const id = 'square' + (Math.floor(Math.random() * 9) + 1);
+      const square = document.getElementById(id);
+      const mole = document.createElement('img');
+      mole.src = 'https://static.wixstatic.com/media/5d5455_e74c159a9a4441ab9d51a94cd2fdb802~mv2.png';
+      mole.classList.add('mole-img');
+      square.appendChild(mole);
+      currentMoleId = id;
+    }
+
+    function startGame() {
+      score = 0;
+      timeLeft = 60;
+      document.getElementById('score').innerText = 'Score: 0';
+      document.getElementById('timer').innerText = 'Time left: 60s';
+      document.getElementById('win-screen').style.display = 'none';
+      document.getElementById('code').style.display = 'none';
+      clearInterval(moleTimer);
+      clearInterval(countdown);
+
+      document.querySelectorAll('.square').forEach(square => {
+        square.onclick = () => {
+          if (square.id === currentMoleId) {
+            score++;
+            document.getElementById('score').innerText = 'Score: ' + score;
+            square.innerHTML = '';
+            currentMoleId = null;
+            if (score >= maxScore) endGame(true);
+          }
+        };
+      });
+
+      moleTimer = setInterval(() => {
+        if (score < maxScore) randomSquare();
+      }, 700);
+
+      countdown = setInterval(() => {
+        timeLeft--;
+        document.getElementById('timer').innerText = 'Time left: ' + timeLeft + 's';
+        if (timeLeft <= 0) endGame(false);
+      }, 1000);
+    }
+
+    function endGame(win) {
+      clearInterval(moleTimer);
+      clearInterval(countdown);
+      document.querySelectorAll('.square').forEach(sq => sq.innerHTML = '');
+      if (win) {
+        document.getElementById('win-screen').style.display = 'block';
+        document.getElementById('code').style.display = 'block';
+      } else {
+        alert('Time’s up! Your score: ' + score);
+      }
+    }
+  </script>
+</body>
+</html>
