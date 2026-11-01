@@ -1,0 +1,697 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dungeon Delve</title>
+  <style>
+    html, body {
+      margin: 0;
+      background: #111;
+      color: #eee;
+      font-family: Arial, sans-serif;
+      text-align: center;
+      overflow-x: hidden;
+    }
+    h1 { margin: 12px 0 4px; letter-spacing: 2px; color: #f5c542; }
+    #hud {
+      display: flex;
+      justify-content: center;
+      gap: 24px;
+      font-size: 18px;
+      margin: 6px 0;
+      flex-wrap: wrap;
+    }
+    #hud span b { color: #f5c542; }
+    #wrap { position: relative; display: inline-block; max-width: 100%; }
+    canvas {
+      display: block;
+      max-width: calc(100vw - 16px);
+      height: auto;
+      border: 3px solid #444;
+      border-radius: 4px;
+      background: #000;
+      touch-action: none;
+    }
+    #overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0,0,0,0.75);
+      border-radius: 4px;
+    }
+    #overlay h2 { font-size: 34px; margin: 0 0 10px; color: #f5c542; }
+    #overlay p { margin: 4px 16px; font-size: 16px; line-height: 1.4; }
+    button {
+      padding: 10px 24px;
+      font-size: 18px;
+      background-color: #28a745;
+      border: none;
+      color: white;
+      border-radius: 6px;
+      cursor: pointer;
+      margin-top: 14px;
+    }
+    button:hover { background-color: #218838; }
+    #help { color: #999; font-size: 14px; margin: 8px 16px 20px; }
+    a { color: #8cf; }
+  </style>
+</head>
+<body>
+  <h1>DUNGEON DELVE</h1>
+  <div id="hud">
+    <span>Health: <b id="hp">0</b></span>
+    <span>Score: <b id="score">0</b></span>
+    <span>Level: <b id="level">1</b></span>
+    <span>Potions: <b id="potions">0</b></span>
+  </div>
+
+  <div id="wrap">
+    <canvas id="game" width="868" height="588"></canvas>
+    <div id="overlay">
+      <h2 id="ovTitle">Dungeon Delve</h2>
+      <p id="ovText">Your health drains every second. Eat food to survive,<br>
+        smash the monster spawners, and find the glowing exit.</p>
+      <button id="startBtn">Start Game</button>
+    </div>
+  </div>
+
+  <div id="help">
+    Move: <b>WASD</b> / <b>Arrow keys</b> &nbsp;·&nbsp; Shoot: <b>Space</b> or <b>J</b> &nbsp;·&nbsp;
+    Potion (clears the screen): <b>B</b> or <b>K</b> &nbsp;·&nbsp; Pause: <b>P</b><br>
+    Touch: drag on the left half to move, tap the right half to shoot, two-finger tap for a potion.<br>
+    Careful: your shots destroy food too! &nbsp;·&nbsp; <a href="index.html">Back to Whack-a-Mole</a>
+  </div>
+
+<script>
+(() => {
+  // ---------- constants ----------
+  const COLS = 31, ROWS = 21, T = 28;
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const WALL = 1, FLOOR = 0;
+
+  const ENEMY_TYPES = {
+    grunt: { hp: 2, speed: 2.6, dmg: 8,  r: 0.32, color: '#c0392b', score: 10, explode: false },
+    ghost: { hp: 1, speed: 3.8, dmg: 12, r: 0.30, color: '#d7e3f4', score: 10, explode: true  },
+    brute: { hp: 5, speed: 1.8, dmg: 15, r: 0.40, color: '#8e44ad', score: 25, explode: false },
+  };
+
+  // ---------- state ----------
+  let grid, dist, player, enemies, bullets, items, generators, particles, exitTile;
+  let score, level, running = false, paused = false, flowTimer = 0, msg = null;
+  const keys = {};
+
+  // ---------- helpers ----------
+  const rnd = (a, b) => a + Math.random() * (b - a);
+  const rint = (a, b) => Math.floor(rnd(a, b + 1));
+  const idx = (x, y) => y * COLS + x;
+  const inBounds = (x, y) => x >= 0 && y >= 0 && x < COLS && y < ROWS;
+
+  function solidAt(tx, ty) {
+    if (!inBounds(tx, ty)) return true;
+    if (grid[idx(tx, ty)] === WALL) return true;
+    return generators.some(g => g.x === tx && g.y === ty);
+  }
+
+  // Circle (approximated by its box) vs tile walls.
+  function blocked(x, y, r) {
+    const x0 = Math.floor(x - r), x1 = Math.floor(x + r);
+    const y0 = Math.floor(y - r), y1 = Math.floor(y + r);
+    for (let ty = y0; ty <= y1; ty++)
+      for (let tx = x0; tx <= x1; tx++)
+        if (solidAt(tx, ty)) return true;
+    return false;
+  }
+
+  function moveEntity(e, dx, dy) {
+    if (dx && !blocked(e.x + dx, e.y, e.r)) e.x += dx;
+    if (dy && !blocked(e.x, e.y + dy, e.r)) e.y += dy;
+  }
+
+  // ---------- level generation ----------
+  function buildLevel() {
+    grid = new Array(COLS * ROWS).fill(WALL);
+    // Recursive-backtracker maze on odd cells.
+    const stack = [[1, 1]];
+    grid[idx(1, 1)] = FLOOR;
+    while (stack.length) {
+      const [cx, cy] = stack[stack.length - 1];
+      const dirs = [[2,0],[-2,0],[0,2],[0,-2]].sort(() => Math.random() - 0.5);
+      let moved = false;
+      for (const [dx, dy] of dirs) {
+        const nx = cx + dx, ny = cy + dy;
+        if (nx > 0 && ny > 0 && nx < COLS - 1 && ny < ROWS - 1 && grid[idx(nx, ny)] === WALL) {
+          grid[idx(cx + dx / 2, cy + dy / 2)] = FLOOR;
+          grid[idx(nx, ny)] = FLOOR;
+          stack.push([nx, ny]);
+          moved = true;
+          break;
+        }
+      }
+      if (!moved) stack.pop();
+    }
+    // Knock out extra walls to create loops (more open = more frantic).
+    for (let y = 1; y < ROWS - 1; y++)
+      for (let x = 1; x < COLS - 1; x++)
+        if (grid[idx(x, y)] === WALL && Math.random() < 0.18) {
+          const h = grid[idx(x - 1, y)] === FLOOR && grid[idx(x + 1, y)] === FLOOR;
+          const v = grid[idx(x, y - 1)] === FLOOR && grid[idx(x, y + 1)] === FLOOR;
+          if (h || v) grid[idx(x, y)] = FLOOR;
+        }
+    // Carve a few open chambers.
+    for (let i = 0; i < 4 + level; i++) {
+      const w = rint(2, 4), h = rint(2, 3);
+      const rx = rint(1, COLS - 2 - w), ry = rint(1, ROWS - 2 - h);
+      for (let y = ry; y < ry + h; y++)
+        for (let x = rx; x < rx + w; x++) grid[idx(x, y)] = FLOOR;
+    }
+
+    generators = [];
+    enemies = []; bullets = []; items = []; particles = [];
+
+    // Distances from the start to place the exit far away.
+    const startD = bfs(1, 1);
+    let far = 0;
+    exitTile = { x: 1, y: 1 };
+    for (let y = 0; y < ROWS; y++)
+      for (let x = 0; x < COLS; x++) {
+        const d = startD[idx(x, y)];
+        if (d > far && d < Infinity) { far = d; exitTile = { x, y }; }
+      }
+
+    const free = [];
+    for (let y = 1; y < ROWS - 1; y++)
+      for (let x = 1; x < COLS - 1; x++) {
+        const d = startD[idx(x, y)];
+        if (grid[idx(x, y)] === FLOOR && d > 4 && d < Infinity &&
+            !(x === exitTile.x && y === exitTile.y)) free.push({ x, y, d });
+      }
+    free.sort(() => Math.random() - 0.5);
+    const take = (pred) => {
+      const i = free.findIndex(pred);
+      return i < 0 ? null : free.splice(i, 1)[0];
+    };
+
+    // Generators: only where they don't seal off a corridor (need 3+ open neighbours).
+    const openNeighbours = (t) => [[1,0],[-1,0],[0,1],[0,-1]]
+      .filter(([dx, dy]) => grid[idx(t.x + dx, t.y + dy)] === FLOOR).length;
+    const genCount = Math.min(3 + level, 12);
+    for (let i = 0; i < genCount; i++) {
+      const t = take(t => t.d > 8 && openNeighbours(t) >= 3);
+      if (!t) break;
+      const tier = Math.random() < Math.min(0.15 * level, 0.6) ? 2 : 1;
+      generators.push({ x: t.x, y: t.y, hp: tier * 4, maxHp: tier * 4, tier, timer: rnd(1, 3), flash: 0 });
+    }
+    // Make sure generators haven't cut the exit off; drop any that do.
+    for (let i = generators.length - 1; i >= 0; i--) {
+      const d = bfs(1, 1);
+      if (d[idx(exitTile.x, exitTile.y)] === Infinity) generators.splice(i, 1);
+      else break;
+    }
+
+    const place = (type, n) => {
+      for (let i = 0; i < n; i++) {
+        const t = take(() => true);
+        if (t) items.push({ type, x: t.x + 0.5, y: t.y + 0.5 });
+      }
+    };
+    place('food', 4 + Math.floor(level / 2));
+    place('treasure', 6 + level);
+    place('potion', 1 + (level % 3 === 0 ? 1 : 0));
+
+    player.x = 1.5; player.y = 1.5;
+    flowTimer = 0;
+    updateFlow();
+    msg = { text: 'Level ' + level, t: 2 };
+  }
+
+  function bfs(sx, sy) {
+    const d = new Array(COLS * ROWS).fill(Infinity);
+    d[idx(sx, sy)] = 0;
+    const q = [[sx, sy]];
+    for (let h = 0; h < q.length; h++) {
+      const [x, y] = q[h];
+      for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+        const nx = x + dx, ny = y + dy;
+        if (!solidAt(nx, ny) && d[idx(nx, ny)] === Infinity) {
+          d[idx(nx, ny)] = d[idx(x, y)] + 1;
+          q.push([nx, ny]);
+        }
+      }
+    }
+    return d;
+  }
+
+  function updateFlow() {
+    dist = bfs(Math.floor(player.x), Math.floor(player.y));
+  }
+
+  // ---------- game flow ----------
+  function newGame() {
+    score = 0; level = 1;
+    player = { x: 1.5, y: 1.5, r: 0.33, hp: 200, speed: 4.2, fx: 1, fy: 0, cooldown: 0,
+               potions: 1, hurt: 0, drain: 0 };
+    buildLevel();
+    running = true; paused = false;
+    hideOverlay();
+  }
+
+  function gameOver() {
+    running = false;
+    showOverlay('Game Over', 'You reached level ' + level + ' with ' + score + ' points.', 'Play Again');
+  }
+
+  function showOverlay(title, text, btn) {
+    document.getElementById('ovTitle').textContent = title;
+    document.getElementById('ovText').innerHTML = text;
+    document.getElementById('startBtn').textContent = btn;
+    document.getElementById('overlay').style.display = 'flex';
+  }
+  function hideOverlay() { document.getElementById('overlay').style.display = 'none'; }
+
+  // ---------- actions ----------
+  function shoot() {
+    if (player.cooldown > 0) return;
+    player.cooldown = 0.22;
+    bullets.push({ x: player.x, y: player.y, vx: player.fx * 11, vy: player.fy * 11, life: 1.2 });
+  }
+
+  function usePotion() {
+    if (player.potions <= 0) return;
+    player.potions--;
+    for (const e of enemies) { score += ENEMY_TYPES[e.type].score; burst(e.x, e.y, ENEMY_TYPES[e.type].color, 10); }
+    enemies = [];
+    for (const g of generators) damageGenerator(g, 2);
+    generators = generators.filter(g => g.hp > 0);
+    updateFlow();
+    flashScreen = 0.4;
+  }
+  let flashScreen = 0;
+
+  function damageGenerator(g, n) {
+    g.hp -= n; g.flash = 0.15;
+    burst(g.x + 0.5, g.y + 0.5, '#f5a623', 6);
+    if (g.hp <= 0) { score += 50 * g.tier; burst(g.x + 0.5, g.y + 0.5, '#f5a623', 25); }
+  }
+
+  function burst(x, y, color, n) {
+    for (let i = 0; i < n; i++) {
+      const a = rnd(0, Math.PI * 2), s = rnd(1, 5);
+      particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: rnd(0.3, 0.7), color });
+    }
+  }
+
+  function spawnEnemy(g) {
+    const spots = [[1,0],[-1,0],[0,1],[0,-1]]
+      .map(([dx, dy]) => ({ x: g.x + dx, y: g.y + dy }))
+      .filter(t => !solidAt(t.x, t.y));
+    if (!spots.length) return;
+    const t = spots[rint(0, spots.length - 1)];
+    const roll = Math.random();
+    let type = 'grunt';
+    if (level >= 2 && roll < 0.3) type = 'ghost';
+    if (level >= 3 && roll > 0.85) type = 'brute';
+    if (g.tier === 2 && roll > 0.6) type = 'brute';
+    const def = ENEMY_TYPES[type];
+    enemies.push({ type, x: t.x + 0.5, y: t.y + 0.5, r: def.r, hp: def.hp, hit: 0, atk: 0 });
+  }
+
+  // ---------- update ----------
+  function update(dt) {
+    if (msg) { msg.t -= dt; if (msg.t <= 0) msg = null; }
+    if (flashScreen > 0) flashScreen -= dt;
+
+    // Health drains over time.
+    player.drain += dt;
+    while (player.drain >= 1) { player.drain -= 1; player.hp -= 1; }
+
+    // Input
+    let mx = 0, my = 0;
+    if (keys.ArrowLeft || keys.KeyA) mx -= 1;
+    if (keys.ArrowRight || keys.KeyD) mx += 1;
+    if (keys.ArrowUp || keys.KeyW) my -= 1;
+    if (keys.ArrowDown || keys.KeyS) my += 1;
+    if (touch.active) { mx = touch.dx; my = touch.dy; }
+    const len = Math.hypot(mx, my);
+    if (len > 0.2) {
+      mx /= len; my /= len;
+      player.fx = mx; player.fy = my;
+      moveEntity(player, mx * player.speed * dt, my * player.speed * dt);
+    }
+    player.cooldown -= dt;
+    if (keys.Space || keys.KeyJ || touch.firing) shoot();
+    if (player.hurt > 0) player.hurt -= dt;
+
+    // Recompute monster pathing a few times a second.
+    flowTimer -= dt;
+    if (flowTimer <= 0) { flowTimer = 0.25; updateFlow(); }
+
+    // Generators
+    for (const g of generators) {
+      g.flash -= dt;
+      g.timer -= dt;
+      if (g.timer <= 0) {
+        g.timer = rnd(2.2, 4.0) / (1 + level * 0.12) / g.tier;
+        if (enemies.length < 30 + level * 4) spawnEnemy(g);
+      }
+    }
+
+    // Enemies
+    for (const e of enemies) {
+      const def = ENEMY_TYPES[e.type];
+      const tx = Math.floor(e.x), ty = Math.floor(e.y);
+      const ptx = Math.floor(player.x), pty = Math.floor(player.y);
+      let gx = player.x, gy = player.y;
+      if (tx !== ptx || ty !== pty) {
+        let best = dist[idx(tx, ty)], bx = null, by = null;
+        for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+          const nx = tx + dx, ny = ty + dy;
+          if (inBounds(nx, ny) && dist[idx(nx, ny)] < best) { best = dist[idx(nx, ny)]; bx = nx; by = ny; }
+        }
+        if (bx !== null) { gx = bx + 0.5; gy = by + 0.5; }
+      }
+      const ddx = gx - e.x, ddy = gy - e.y, dl = Math.hypot(ddx, ddy) || 1;
+      moveEntity(e, ddx / dl * def.speed * dt, ddy / dl * def.speed * dt);
+      e.hit -= dt; e.atk -= dt;
+    }
+    // Keep monsters from stacking on top of each other.
+    for (let i = 0; i < enemies.length; i++)
+      for (let j = i + 1; j < enemies.length; j++) {
+        const a = enemies[i], b = enemies[j];
+        const dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy), min = a.r + b.r;
+        if (d > 0 && d < min) {
+          const push = (min - d) / 2;
+          moveEntity(a, -dx / d * push, -dy / d * push);
+          moveEntity(b, dx / d * push, dy / d * push);
+        }
+      }
+    // Contact damage
+    for (let i = enemies.length - 1; i >= 0; i--) {
+      const e = enemies[i], def = ENEMY_TYPES[e.type];
+      if (Math.hypot(e.x - player.x, e.y - player.y) < e.r + player.r) {
+        if (def.explode) {
+          player.hp -= def.dmg; player.hurt = 0.2;
+          burst(e.x, e.y, def.color, 14);
+          enemies.splice(i, 1);
+        } else if (e.atk <= 0) {
+          player.hp -= def.dmg; player.hurt = 0.2; e.atk = 0.7;
+        }
+      }
+    }
+
+    // Bullets
+    for (let i = bullets.length - 1; i >= 0; i--) {
+      const b = bullets[i];
+      b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt;
+      let dead = b.life <= 0;
+      const tx = Math.floor(b.x), ty = Math.floor(b.y);
+      const g = generators.find(g => g.x === tx && g.y === ty);
+      if (g) { damageGenerator(g, 1); dead = true; }
+      else if (!inBounds(tx, ty) || grid[idx(tx, ty)] === WALL) { dead = true; burst(b.x, b.y, '#777', 3); }
+      if (!dead) {
+        for (let j = enemies.length - 1; j >= 0; j--) {
+          const e = enemies[j];
+          if (Math.hypot(e.x - b.x, e.y - b.y) < e.r + 0.12) {
+            e.hp--; e.hit = 0.1; dead = true;
+            if (e.hp <= 0) {
+              score += ENEMY_TYPES[e.type].score;
+              burst(e.x, e.y, ENEMY_TYPES[e.type].color, 12);
+              enemies.splice(j, 1);
+            }
+            break;
+          }
+        }
+      }
+      if (!dead) {
+        // Shots destroy food!
+        const k = items.findIndex(it => it.type === 'food' && Math.hypot(it.x - b.x, it.y - b.y) < 0.4);
+        if (k >= 0) { burst(items[k].x, items[k].y, '#e67e22', 10); items.splice(k, 1); dead = true; }
+      }
+      if (dead) bullets.splice(i, 1);
+    }
+    if (generators.some(g => g.hp <= 0)) {
+      generators = generators.filter(g => g.hp > 0);
+      updateFlow();
+    }
+
+    // Items
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i];
+      if (Math.hypot(it.x - player.x, it.y - player.y) < 0.6) {
+        if (it.type === 'food') { player.hp += 50; burst(it.x, it.y, '#2ecc71', 10); }
+        if (it.type === 'treasure') { score += 100; burst(it.x, it.y, '#f5c542', 10); }
+        if (it.type === 'potion') { player.potions++; burst(it.x, it.y, '#3498db', 10); }
+        items.splice(i, 1);
+      }
+    }
+
+    // Particles
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.92; p.vy *= 0.92; p.life -= dt;
+      if (p.life <= 0) particles.splice(i, 1);
+    }
+
+    // Exit
+    if (Math.floor(player.x) === exitTile.x && Math.floor(player.y) === exitTile.y) {
+      score += 250 + (generators.length === 0 ? 500 : 0);
+      level++;
+      buildLevel();
+    }
+
+    if (player.hp <= 0) { player.hp = 0; gameOver(); }
+  }
+
+  // ---------- drawing ----------
+  let time = 0;
+  function draw() {
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Tiles
+    for (let y = 0; y < ROWS; y++)
+      for (let x = 0; x < COLS; x++) {
+        const px = x * T, py = y * T;
+        if (grid[idx(x, y)] === WALL) {
+          ctx.fillStyle = '#5b4a3a';
+          ctx.fillRect(px, py, T, T);
+          ctx.fillStyle = '#76614d';
+          ctx.fillRect(px, py, T, 4);
+          ctx.fillStyle = '#3e3227';
+          ctx.fillRect(px, py + T - 3, T, 3);
+          ctx.strokeStyle = '#3e3227';
+          ctx.beginPath();
+          ctx.moveTo(px, py + T / 2); ctx.lineTo(px + T, py + T / 2);
+          ctx.moveTo(px + ((y % 2) ? T / 2 : T / 4), py + 4); ctx.lineTo(px + ((y % 2) ? T / 2 : T / 4), py + T / 2);
+          ctx.stroke();
+        } else {
+          ctx.fillStyle = (x + y) % 2 ? '#1d1f24' : '#202329';
+          ctx.fillRect(px, py, T, T);
+        }
+      }
+
+    // Exit
+    const pulse = 0.5 + 0.5 * Math.sin(time * 4);
+    ctx.fillStyle = `rgba(80, 220, 255, ${0.35 + 0.4 * pulse})`;
+    ctx.fillRect(exitTile.x * T + 2, exitTile.y * T + 2, T - 4, T - 4);
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 10px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('EXIT', exitTile.x * T + T / 2, exitTile.y * T + T / 2);
+
+    // Items
+    for (const it of items) {
+      const px = it.x * T, py = it.y * T;
+      if (it.type === 'food') {
+        ctx.fillStyle = '#e67e22';
+        ctx.beginPath(); ctx.ellipse(px, py, 8, 6, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#f5f5f5';
+        ctx.fillRect(px + 6, py - 2, 6, 4);
+      } else if (it.type === 'treasure') {
+        ctx.fillStyle = '#b8860b';
+        ctx.fillRect(px - 8, py - 6, 16, 12);
+        ctx.fillStyle = '#f5c542';
+        ctx.fillRect(px - 8, py - 6, 16, 4);
+        ctx.fillRect(px - 2, py - 2, 4, 4);
+      } else if (it.type === 'potion') {
+        ctx.fillStyle = '#3498db';
+        ctx.beginPath(); ctx.arc(px, py + 2, 7, 0, Math.PI * 2); ctx.fill();
+        ctx.fillRect(px - 2, py - 9, 4, 6);
+      }
+    }
+
+    // Generators
+    for (const g of generators) {
+      const px = g.x * T, py = g.y * T;
+      ctx.fillStyle = g.flash > 0 ? '#fff' : (g.tier === 2 ? '#7b241c' : '#a04000');
+      ctx.fillRect(px + 2, py + 2, T - 4, T - 4);
+      ctx.strokeStyle = '#f5a623';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(px + 4, py + 4, T - 8, T - 8);
+      ctx.lineWidth = 1;
+      const f = g.hp / g.maxHp;
+      ctx.fillStyle = `rgba(255, 200, 50, ${0.3 + 0.5 * pulse * f})`;
+      ctx.beginPath(); ctx.arc(px + T / 2, py + T / 2, 5 * f + 2, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // Enemies
+    for (const e of enemies) {
+      const def = ENEMY_TYPES[e.type];
+      const px = e.x * T, py = e.y * T, r = e.r * T;
+      ctx.fillStyle = e.hit > 0 ? '#fff' : def.color;
+      if (e.type === 'ghost') {
+        ctx.globalAlpha = 0.85;
+        ctx.beginPath();
+        ctx.arc(px, py - 2, r, Math.PI, 0);
+        ctx.lineTo(px + r, py + r);
+        for (let k = 0; k < 4; k++) ctx.lineTo(px + r - (k + 0.5) * r / 2, py + r - ((k % 2) ? 0 : 5));
+        ctx.lineTo(px - r, py + r);
+        ctx.closePath(); ctx.fill();
+        ctx.globalAlpha = 1;
+      } else if (e.type === 'brute') {
+        ctx.fillRect(px - r, py - r, r * 2, r * 2);
+        ctx.fillStyle = '#5b2c6f';
+        ctx.fillRect(px - r, py - r, r * 2, 4);
+      } else {
+        ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#7b1d14';
+        ctx.beginPath(); ctx.moveTo(px - r, py - r + 2); ctx.lineTo(px - r / 2, py - r * 1.4); ctx.lineTo(px, py - r + 2); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(px + r, py - r + 2); ctx.lineTo(px + r / 2, py - r * 1.4); ctx.lineTo(px, py - r + 2); ctx.fill();
+      }
+      // Eyes, looking at the player.
+      const ang = Math.atan2(player.y - e.y, player.x - e.x);
+      ctx.fillStyle = e.type === 'ghost' ? '#222' : '#ff0';
+      ctx.fillRect(px - 5 + Math.cos(ang) * 2, py - 4 + Math.sin(ang) * 2, 3, 3);
+      ctx.fillRect(px + 2 + Math.cos(ang) * 2, py - 4 + Math.sin(ang) * 2, 3, 3);
+    }
+
+    // Bullets
+    ctx.fillStyle = '#f9e79f';
+    for (const b of bullets) {
+      ctx.beginPath(); ctx.arc(b.x * T, b.y * T, 4, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // Player
+    {
+      const px = player.x * T, py = player.y * T, r = player.r * T;
+      ctx.fillStyle = player.hurt > 0 ? '#ff6b6b' : '#27ae60';
+      ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = '#d5f5e3'; ctx.lineWidth = 2;
+      ctx.stroke(); ctx.lineWidth = 1;
+      // Sword / facing indicator
+      ctx.strokeStyle = '#ecf0f1'; ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(px + player.fx * r * 0.4, py + player.fy * r * 0.4);
+      ctx.lineTo(px + player.fx * r * 1.5, py + player.fy * r * 1.5);
+      ctx.stroke(); ctx.lineWidth = 1;
+    }
+
+    // Particles
+    for (const p of particles) {
+      ctx.globalAlpha = Math.max(0, p.life * 1.5);
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x * T - 2, p.y * T - 2, 4, 4);
+    }
+    ctx.globalAlpha = 1;
+
+    if (flashScreen > 0) {
+      ctx.fillStyle = `rgba(120, 180, 255, ${flashScreen})`;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+    if (player.hp < 40 && running && Math.sin(time * 8) > 0) {
+      ctx.fillStyle = 'rgba(255, 0, 0, 0.12)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+    if (msg) {
+      ctx.globalAlpha = Math.min(1, msg.t);
+      ctx.fillStyle = '#f5c542';
+      ctx.font = 'bold 42px Arial';
+      ctx.fillText(msg.text, canvas.width / 2, canvas.height / 2);
+      ctx.globalAlpha = 1;
+    }
+    if (paused) {
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 42px Arial';
+      ctx.fillText('PAUSED', canvas.width / 2, canvas.height / 2);
+    }
+
+    document.getElementById('hp').textContent = Math.ceil(player.hp);
+    document.getElementById('score').textContent = score;
+    document.getElementById('level').textContent = level;
+    document.getElementById('potions').textContent = player.potions;
+  }
+
+  // ---------- main loop ----------
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    time += dt;
+    if (running && !paused) update(dt);
+    if (grid) draw();
+    requestAnimationFrame(frame);
+  }
+
+  // ---------- input ----------
+  const GAME_KEYS = ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'];
+  window.addEventListener('keydown', e => {
+    if (GAME_KEYS.includes(e.code) && running) e.preventDefault();
+    keys[e.code] = true;
+    if (!running) return;
+    if (e.code === 'KeyP' || e.code === 'Escape') paused = !paused;
+    if ((e.code === 'KeyB' || e.code === 'KeyK') && !e.repeat && !paused) usePotion();
+  });
+  window.addEventListener('keyup', e => { keys[e.code] = false; });
+  window.addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+
+  const touch = { active: false, id: null, sx: 0, sy: 0, dx: 0, dy: 0, firing: false, fireIds: new Set() };
+  canvas.addEventListener('touchstart', e => {
+    e.preventDefault();
+    if (e.touches.length >= 2 && running) usePotion();
+    const rect = canvas.getBoundingClientRect();
+    for (const t of e.changedTouches) {
+      if (t.clientX - rect.left < rect.width / 2 && touch.id === null) {
+        touch.id = t.identifier; touch.sx = t.clientX; touch.sy = t.clientY;
+        touch.active = true; touch.dx = 0; touch.dy = 0;
+      } else {
+        touch.fireIds.add(t.identifier); touch.firing = true;
+      }
+    }
+  }, { passive: false });
+  canvas.addEventListener('touchmove', e => {
+    e.preventDefault();
+    for (const t of e.changedTouches)
+      if (t.identifier === touch.id) {
+        const dx = t.clientX - touch.sx, dy = t.clientY - touch.sy, d = Math.hypot(dx, dy);
+        if (d > 8) { touch.dx = dx / d; touch.dy = dy / d; } else { touch.dx = 0; touch.dy = 0; }
+      }
+  }, { passive: false });
+  const endTouch = e => {
+    for (const t of e.changedTouches) {
+      if (t.identifier === touch.id) { touch.id = null; touch.active = false; }
+      touch.fireIds.delete(t.identifier);
+    }
+    touch.firing = touch.fireIds.size > 0;
+  };
+  canvas.addEventListener('touchend', endTouch);
+  canvas.addEventListener('touchcancel', endTouch);
+
+  document.getElementById('startBtn').addEventListener('click', newGame);
+
+  // Draw an idle preview level behind the start screen.
+  score = 0; level = 1;
+  player = { x: 1.5, y: 1.5, r: 0.33, hp: 200, fx: 1, fy: 0, potions: 1, hurt: 0 };
+  buildLevel();
+  msg = null;
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
